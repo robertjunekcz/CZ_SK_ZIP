@@ -10,12 +10,48 @@ import requests
 CZ_KRAJ = "https://services.cuzk.gov.cz/sestavy/cis/UI_VUSC.zip"
 CZ_OKRES = "https://services.cuzk.gov.cz/sestavy/cis/UI_OKRES.zip"
 CZ_OBEC = "https://services.cuzk.gov.cz/sestavy/cis/UI_OBEC.zip"
-CZ_ADRESY = "https://vdp.cuzk.gov.cz/vymenny_format/csv/20260228_OB_ADR_csv.zip"
+CZ_ADRESY = "https://vdp.cuzk.gov.cz/vymenny_format/csv/20260630_OB_ADR_csv.zip"
 
 SK_ADRESY = "https://data.slovensko.sk/download?id=6eba6ef5-24a2-455e-9f7a-eb8a139b3af7"
 
+# Statický lookup kódů slovenských obcí/okresů/krajů — generuje `build_sk_lookup.py`.
+# Slovenská adresní data obsahují jen názvy, kódy je nutné doplnit odjinud.
+SK_LOOKUP = Path(__file__).parent / "lookup_sk_obec.csv"
+
 OUTPUT_FILE = Path(__file__).parent.parent / "seznampsc.csv"          # finální výstup s dedupem
-OUTPUT_FILE_ALL = Path(__file__).parent.parent / "seznampsc_all.csv"  # soubor bez dedup 
+OUTPUT_FILE_ALL = Path(__file__).parent.parent / "seznampsc_all.csv"  # soubor bez dedup
+
+# ISO 3166-2 kódy krajů podle NUTS3. Pro CZ jsou odvoditelné z NUTS3, pro SK nikoliv,
+# proto je uvádíme explicitně pro obě země.
+REGION_ISO = {
+    "CZ010": "CZ-10",  # Hlavní město Praha
+    "CZ020": "CZ-20",  # Středočeský
+    "CZ031": "CZ-31",  # Jihočeský
+    "CZ032": "CZ-32",  # Plzeňský
+    "CZ041": "CZ-41",  # Karlovarský
+    "CZ042": "CZ-42",  # Ústecký
+    "CZ051": "CZ-51",  # Liberecký
+    "CZ052": "CZ-52",  # Královéhradecký
+    "CZ053": "CZ-53",  # Pardubický
+    "CZ063": "CZ-63",  # Vysočina
+    "CZ064": "CZ-64",  # Jihomoravský
+    "CZ071": "CZ-71",  # Olomoucký
+    "CZ072": "CZ-72",  # Zlínský
+    "CZ080": "CZ-80",  # Moravskoslezský
+    "SK010": "SK-BL",  # Bratislavský
+    "SK021": "SK-TA",  # Trnavský
+    "SK022": "SK-TC",  # Trenčiansky
+    "SK023": "SK-NI",  # Nitriansky
+    "SK031": "SK-ZI",  # Žilinský
+    "SK032": "SK-BC",  # Banskobystrický
+    "SK041": "SK-PV",  # Prešovský
+    "SK042": "SK-KI",  # Košický
+}
+
+# Pořadí sloupců ve výstupu. Prvních 7 (resp. 8 s address_count) zůstává kvůli
+# zpětné kompatibilitě beze změny, kódy se připojují až za ně.
+BASE_COLS = ["country_zip", "country_code", "country", "zip", "municipality", "county", "region"]
+CODE_COLS = ["obec_kod", "okres_kod", "okres_lau1", "vusc_kod", "region_nuts3", "region_iso"]
 
 
 # ---------------------------------------------------------------------------
@@ -106,16 +142,23 @@ def process_cz(tmp_dir: str) -> pd.DataFrame:
     df_kraj, df_okres, df_obec = load_cz_codebooks(tmp_dir)
 
     # Určení klíčových sloupců v číselníku krajů
-    kraj_kod = find_col(df_kraj.columns.tolist(), "KOD") or df_kraj.columns[0]
-    kraj_nazev = find_col(df_kraj.columns.tolist(), "NAZEV") or df_kraj.columns[1]
+    kraj_cols = df_kraj.columns.tolist()
+    kraj_kod = find_col(kraj_cols, "KOD") or kraj_cols[0]
+    kraj_nazev = find_col(kraj_cols, "NAZEV") or kraj_cols[1]
+    kraj_nuts = find_col(kraj_cols, "NUTS")
+    if not kraj_nuts:
+        raise KeyError(f"Nenalezen sloupec s NUTS kódem v číselníku krajů. Sloupce: {kraj_cols}")
 
     # Určení klíčových sloupců v číselníku okresů
     okres_cols = df_okres.columns.tolist()
     okres_kod = find_col(okres_cols, "KOD") or okres_cols[0]
     okres_nazev = find_col(okres_cols, "NAZEV") or okres_cols[1]
     okres_vusc = find_col(okres_cols, "VUSC") or find_col(okres_cols, "KRAJ")
+    okres_nuts = find_col(okres_cols, "NUTS")
     if not okres_vusc:
         raise KeyError(f"Nenalezen sloupec odkazující na kraj v číselníku okresů. Sloupce: {okres_cols}")
+    if not okres_nuts:
+        raise KeyError(f"Nenalezen sloupec s LAU kódem v číselníku okresů. Sloupce: {okres_cols}")
 
     # Určení klíčových sloupců v číselníku obcí
     obec_cols = df_obec.columns.tolist()
@@ -126,9 +169,11 @@ def process_cz(tmp_dir: str) -> pd.DataFrame:
         raise KeyError(f"Nenalezen sloupec odkazující na okres v číselníku obcí. Sloupce: {obec_cols}")
 
     # Sestavit lookup tabulky: obec_kod → (municipality, okres_nazev, kraj_nazev)
-    df_k = df_kraj[[kraj_kod, kraj_nazev]].rename(columns={kraj_kod: "vusc_kod", kraj_nazev: "region"})
-    df_o = df_okres[[okres_kod, okres_nazev, okres_vusc]].rename(
-        columns={okres_kod: "okres_kod", okres_nazev: "county", okres_vusc: "vusc_kod"}
+    df_k = df_kraj[[kraj_kod, kraj_nazev, kraj_nuts]].rename(
+        columns={kraj_kod: "vusc_kod", kraj_nazev: "region", kraj_nuts: "region_nuts3"}
+    )
+    df_o = df_okres[[okres_kod, okres_nazev, okres_vusc, okres_nuts]].rename(
+        columns={okres_kod: "okres_kod", okres_nazev: "county", okres_vusc: "vusc_kod", okres_nuts: "okres_lau1"}
     )
     df_b = df_obec[[obec_kod, obec_nazev, obec_okres]].rename(
         columns={obec_kod: "obec_kod", obec_nazev: "municipality", obec_okres: "okres_kod"}
@@ -221,7 +266,8 @@ def process_cz(tmp_dir: str) -> pd.DataFrame:
     df_result["country_code"] = "CZ"
     df_result["country_zip"] = "CZ-" + df_result["zip"]
 
-    return df_result[["country_zip", "country_code", "zip", "municipality", "county", "region", "address_count"]]
+    cols = ["country_zip", "country_code", "zip", "municipality", "county", "region", "address_count"]
+    return df_result[cols + ["obec_kod", "okres_kod", "okres_lau1", "vusc_kod", "region_nuts3"]]
 
 
 # ---------------------------------------------------------------------------
@@ -237,6 +283,48 @@ def download_csv(url: str, dest: Path) -> None:
     with open(dest, "wb") as fh:
         for chunk in response.iter_content(chunk_size=1024 * 1024):
             fh.write(chunk)
+
+
+def _sk_key(municipality: pd.Series, county: pd.Series) -> pd.Series:
+    """Spojovací klíč pro SK data: název obce + okresu bez diakritiky, pomlček a zdvojených mezer."""
+
+    def norm(value: str) -> str:
+        return " ".join(_norm(str(value)).replace("-", " ").split())
+
+    return municipality.map(norm) + "|" + county.map(norm)
+
+
+def join_sk_codes(df: pd.DataFrame) -> pd.DataFrame:
+    """Doplní kódy obcí, okresů a krajů ze statického lookupu GKÚ (`lookup_sk_obec.csv`)."""
+    if not SK_LOOKUP.exists():
+        raise FileNotFoundError(
+            f"Chybí lookup {SK_LOOKUP}. Vygenerujte ho příkazem: python src/build_sk_lookup.py"
+        )
+
+    lookup = read_csv_auto(SK_LOOKUP)
+    lookup["key"] = _sk_key(lookup["municipality"], lookup["county"])
+
+    # Adresní data u vojenských obvodů vynechávají suffix "(vojenský obvod)", který
+    # GKÚ v názvu má — druhý pokus proto párujeme proti názvu bez závorky.
+    alt = lookup.copy()
+    alt["key"] = _sk_key(alt["municipality"].str.replace(r"\s*\(.*\)", "", regex=True), alt["county"])
+    alt = alt[~alt["key"].isin(set(lookup["key"]))].drop_duplicates("key", keep=False)
+
+    code_cols = ["obec_kod", "okres_kod", "okres_lau1", "vusc_kod", "region_nuts3"]
+    combined = pd.concat([lookup, alt], ignore_index=True)[["key"] + code_cols]
+
+    df = df.copy()
+    df["key"] = _sk_key(df["municipality"], df["county"])
+    df = df.merge(combined, on="key", how="left").drop(columns=["key"])
+
+    missing = df[df["obec_kod"].isna()]
+    if len(missing) > 0:
+        unmatched = missing[["municipality", "county"]].drop_duplicates().values.tolist()
+        print(f"  [VAROVÁNÍ] {len(missing)} řádků bez kódu obce: {unmatched[:5]}")
+    else:
+        print(f"  [OK] Kódy doplněny pro všech {len(df)} řádků")
+
+    return df
 
 
 def process_sk(tmp_dir: str) -> pd.DataFrame:
@@ -269,7 +357,11 @@ def process_sk(tmp_dir: str) -> pd.DataFrame:
     df_counts["country_code"] = "SK"
     df_counts["country_zip"] = "SK-" + df_counts["zip"]
 
-    return df_counts[["country_zip", "country_code", "zip", "municipality", "county", "region", "address_count"]]
+    print("  Doplňuji kódy obcí/okresů/krajů z lookupu GKÚ...")
+    df_counts = join_sk_codes(df_counts)
+
+    cols = ["country_zip", "country_code", "zip", "municipality", "county", "region", "address_count"]
+    return df_counts[cols + ["obec_kod", "okres_kod", "okres_lau1", "vusc_kod", "region_nuts3"]]
 
 
 # ---------------------------------------------------------------------------
@@ -282,10 +374,7 @@ def validate_output(df: pd.DataFrame, label: str = "", dedup: bool = True) -> bo
     ok = True
 
     # 1. Struktura sloupců
-    if dedup:
-        expected_cols = ["country_zip", "country_code", "country", "zip", "municipality", "county", "region"]
-    else:
-        expected_cols = ["country_zip", "country_code", "country", "zip", "municipality", "county", "region", "address_count"]
+    expected_cols = BASE_COLS + ([] if dedup else ["address_count"]) + CODE_COLS
     if list(df.columns) != expected_cols:
         print(f"  [CHYBA] Neočekávané sloupce: {list(df.columns)}")
         ok = False
@@ -372,7 +461,38 @@ def validate_output(df: pd.DataFrame, label: str = "", dedup: bool = True) -> bo
     if all(df[c].notna().all() for c in ["municipality", "county", "region"]):
         print("  [OK] Žádné prázdné hodnoty v municipality/county/region")
 
-    # 10. Seřazení podle country_zip
+    # 10. Úplnost kódů
+    for col in CODE_COLS:
+        null_count = int(df[col].isna().sum())
+        if null_count > 0:
+            sample = df[df[col].isna()][["country_code", "municipality", "county"]].head(3).values.tolist()
+            print(f"  [CHYBA] {null_count} prázdných hodnot v '{col}': {sample}")
+            ok = False
+    if all(df[c].notna().all() for c in CODE_COLS):
+        print(f"  [OK] Žádné prázdné hodnoty v kódech ({', '.join(CODE_COLS)})")
+
+    # 11. Počty územních jednotek — 14 CZ + 8 SK krajů, 77 CZ + 79 SK okresů
+    n_kraje = df["region_nuts3"].nunique()
+    n_okresy = df["okres_lau1"].nunique()
+    if n_kraje != 22:
+        print(f"  [CHYBA] Počet krajů: {n_kraje} (očekáváno 22)")
+        ok = False
+    else:
+        print("  [OK] Počet krajů: 22")
+    if n_okresy != 156:
+        print(f"  [VAROVÁNÍ] Počet okresů: {n_okresy} (očekáváno 156)")
+    else:
+        print("  [OK] Počet okresů: 156")
+
+    # 12. region_iso odpovídá mapování podle NUTS3
+    bad_iso = df[df["region_iso"] != df["region_nuts3"].map(REGION_ISO)]
+    if len(bad_iso) > 0:
+        print(f"  [CHYBA] Neplatný region_iso ({len(bad_iso)} řádků): {bad_iso['region_nuts3'].unique().tolist()[:5]}")
+        ok = False
+    else:
+        print("  [OK] region_iso odpovídá NUTS3")
+
+    # 13. Seřazení podle country_zip
     if not df["country_zip"].is_monotonic_increasing:
         print("  [CHYBA] Výstup není seřazen podle country_zip")
         ok = False
@@ -401,7 +521,8 @@ def main():
     # Sloučit a seřadit
     df_all = pd.concat([df_cz, df_sk], ignore_index=True)
     df_all = df_all.sort_values("country_zip").reset_index(drop=True)
-    df_all = df_all[["country_zip", "country_code", "country", "zip", "municipality", "county", "region", "address_count"]]
+    df_all["region_iso"] = df_all["region_nuts3"].map(REGION_ISO)
+    df_all = df_all[BASE_COLS + ["address_count"] + CODE_COLS]
 
     # Deduplikace: pro každé country_zip ponechat řádek s nejvyšším address_count
     df_dedup = (
@@ -413,10 +534,10 @@ def main():
     )
 
     # Uložit oba soubory
-    df_all.to_csv(OUTPUT_FILE_ALL, sep=";", index=False, encoding="utf-8")
+    df_all.to_csv(OUTPUT_FILE_ALL, sep=";", index=False, encoding="utf-8-sig")
     print(f"\nUloženo: {OUTPUT_FILE_ALL} ({len(df_all)} řádků)")
 
-    df_dedup.to_csv(OUTPUT_FILE, sep=";", index=False, encoding="utf-8")
+    df_dedup.to_csv(OUTPUT_FILE, sep=";", index=False, encoding="utf-8-sig")
     print(f"Uloženo: {OUTPUT_FILE} ({len(df_dedup)} řádků)")
 
     validate_output(df_all, label="all", dedup=False)
