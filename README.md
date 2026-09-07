@@ -7,6 +7,7 @@ Soubory v tomto projektu obsahují zpracovaná data o PSČ, obcích, okresech a 
 - `seznampsc_all.csv`: Kompletní seznam PSČ s přiřazenými obcemi, okresy a kraji pro ČR a SR; obsahuje všechny kombinace PSČ a obcí, **včetně duplicit.** Není tak obvykle vhodný pro běžné použití.
 - `src/lookup_sk_obec.csv`: Pomocný číselník kódů slovenských obcí, okresů a krajů. Slovenská adresní data obsahují pouze názvy, kódy se doplňují odsud.
 - `shapes/*.topo.json`: Hranice krajů a okresů ve formátu TopoJSON (WGS84) — obě země pohromadě i každá zvlášť. Určeno pro vlastní mapy v Power BI, ale použitelné i jinde.
+- `shapes/*_unknown.topo.json`: Totéž plus jeden útvar navíc — čtverec vedle mapy, do kterého spadnou řádky s neznámým krajem nebo okresem (`-1`).
 
 ## Struktura sloupců
 
@@ -46,9 +47,11 @@ Ve složce `shapes/` jsou hranice krajů a okresů ve formátu **TopoJSON, souř
 | `shapes/CZ_districts.topo.json` | 77 | 234 kB | `okres_lau1` |
 | `shapes/SK_districts.topo.json` | 79 | 116 kB | `okres_lau1` |
 
+Ke každému souboru je navíc varianta `_unknown` (např. `shapes/CZSK_regions_unknown.topo.json`) s prvkem pro neznámou hodnotu — viz [níže](#neznámé-hodnoty--1).
+
 Každý útvar nese vlastnosti pojmenované stejně jako sloupce v CSV — u krajů `country_code`, `region`, `vusc_kod`, `region_nuts3`, `region_iso`, u okresů navíc `county`, `okres_kod` a `okres_lau1`. Spojení s daty tak nevyžaduje žádné přejmenovávání.
 
-Vrstva uvnitř souboru se jmenuje podle úrovně (`regions`, resp. `districts`) bez ohledu na variantu, takže vizuál, který se na ni odkazuje, funguje se všemi třemi soubory stejně.
+Vrstva uvnitř souboru se jmenuje podle úrovně (`regions`, resp. `districts`) bez ohledu na variantu, takže vizuál, který se na ni odkazuje, funguje se všemi soubory stejně.
 
 ### Použití v Power BI
 
@@ -64,6 +67,31 @@ Geometrie je zjednodušená na 5 % původního počtu bodů. Tvar hranic to zach
 
 *Poznámka: Hranice ČR a SR pocházejí ze dvou nezávislých registrů. Podél společné státní hranice proto mohou vznikat nepatrné odchylky v řádu metrů, které se ve vizualizaci neprojeví.*
 
+### Neznámé hodnoty (`-1`)
+
+Shape Map obarví jen ty útvary, které v mapě existují. Řádky, u kterých kraj nebo okres neznáte, se proto z vizuálu ztratí úplně — nikde nevidíte, kolik jich je. Varianty `_unknown` řeší tohle: obsahují o jeden útvar navíc, čtverec umístěný ve volném rohu vedle mapy, a **všechny jeho kódy mají hodnotu `-1`**.
+
+| soubor | útvarů | umístění čtverce |
+|---|---|---|
+| `shapes/CZSK_regions_unknown.topo.json` | 22 + 1 | vpravo nahoře, nad východním Slovenskem |
+| `shapes/CZ_regions_unknown.topo.json` | 14 + 1 | vpravo nahoře, nad Moravskoslezským krajem |
+| `shapes/SK_regions_unknown.topo.json` | 8 + 1 | vpravo dole, pod východním Slovenskem |
+| `shapes/CZSK_districts_unknown.topo.json` | 156 + 1 | vpravo nahoře |
+| `shapes/CZ_districts_unknown.topo.json` | 77 + 1 | vpravo nahoře |
+| `shapes/SK_districts_unknown.topo.json` | 79 + 1 | vpravo dole |
+
+Čtverec leží uvnitř původního výřezu, ve volném místě — mapa se kvůli němu nezmenší a zůstane stejně velká jako v základní variantě. Vysoký je zhruba pětinu výšky mapy.
+
+Použití je stejné jako u základních souborů, jen v datech nahradíte prázdnou hodnotu klíče za `-1`:
+
+```
+Kraj = COALESCE('Data'[region_nuts3], "-1")
+```
+
+Hodnotu `-1` nesou všechny kódové sloupce (`region_nuts3`, `okres_lau1`, `vusc_kod`, `okres_kod`, `region_iso` i `country_code`), takže funguje bez ohledu na to, přes který z nich spojujete. Textové sloupce `region` a `county` mají `Neznámé`, aby dávaly smysl v tooltipu.
+
+Čtverec je čtvercový i na obrazovce — souřadnice se počítají v Mercatorově projekci, kterou se TopoJSON vykresluje, takže je ve stupních zeměpisné délky širší, než vysoký.
+
 ### Aktualizace mapových podkladů
 
 Soubory vygeneruje skript `src/build_shapes.py`. Kromě Pythonu vyžaduje **Node.js** — mapshaper, který se stará o reprojekci, zjednodušení a export do TopoJSONu, se stáhne automaticky přes `npx`.
@@ -73,7 +101,15 @@ python src/ruian_data_processing.py   # nejdřív CSV, proti kterému se mapy ov
 python src/build_shapes.py
 ```
 
-Skript na závěr kontroluje, že se klíče v mapách přesně kryjí s `seznampsc.csv` na obou stranách, a při neshodě skončí chybou.
+Skript kontroluje, že se klíče v mapách přesně kryjí s `seznampsc.csv` na obou stranách, a při neshodě skončí chybou. Na závěr sám spustí `src/build_unknown_shapes.py`, který dopočítá varianty `_unknown`.
+
+Chcete-li jen změnit velikost nebo umístění čtverce pro neznámou hodnotu, upravte konstanty `SQUARE_SIZE`, `MARGIN` a `CORNERS` v `src/build_unknown_shapes.py` a spusťte ho samostatně:
+
+```
+python src/build_unknown_shapes.py
+```
+
+Pracuje nad hotovými soubory ve `shapes/`, takže nic nestahuje a nepotřebuje Node.js. Umístění čtverce si ověřuje proti geometrii — pokud by zasahoval do některého kraje či okresu, skončí chybou místo aby vyrobil rozbitou mapu.
 
 ## Aktualizace dat
 Chcete-li aktualizovat data, můžete si stáhnout celý repozitář, nainstalovat požadované závislosti z `src/requirements.txt` a spustit skript `src/ruian_data_processing.py`. Pokud v něm aktualizujete URL pro zdroje dat, skript sám vygeneruje příslušné CSV soubory s aktuálními daty.
@@ -150,6 +186,8 @@ The `shapes/` folder contains boundaries of regions (kraje) and districts (okres
 | `shapes/CZSK_districts.topo.json` | 156 | 351 kB | `okres_lau1` (`CZ0100`, `SK0319`) |
 | `shapes/CZ_districts.topo.json` | 77 | 234 kB | `okres_lau1` |
 | `shapes/SK_districts.topo.json` | 79 | 116 kB | `okres_lau1` |
+
+Ke každému souboru je navíc varianta `_unknown` (např. `shapes/CZSK_regions_unknown.topo.json`) s prvkem pro neznámou hodnotu — viz [níže](#neznámé-hodnoty--1).
 
 Each shape carries properties named exactly like the CSV columns — `country_code`, `region`, `vusc_kod`, `region_nuts3`, `region_iso` for regions, plus `county`, `okres_kod`, and `okres_lau1` for districts. Joining to the data needs no renaming.
 

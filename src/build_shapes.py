@@ -4,7 +4,8 @@ Postup:
   1. stáhne hranice územních prvků z ČÚZK (SHP, S-JTSK) a z GKÚ Bratislava (GeoJSON, WGS84),
   2. přeprojektuje česká data do WGS84 a sjednotí názvy atributů s `seznampsc.csv`,
   3. sloučí obě země, zjednoduší geometrii a uloží jako TopoJSON,
-  4. ověří, že se klíče shodují s `seznampsc.csv` — na obou stranách, bez zbytků.
+  4. ověří, že se klíče shodují s `seznampsc.csv` — na obou stranách, bez zbytků,
+  5. přidá varianty `*_unknown` s útvarem pro neznámou hodnotu (`build_unknown_shapes.py`).
 
     python src/build_shapes.py
 
@@ -26,6 +27,7 @@ from pathlib import Path
 import pandas as pd
 import requests
 
+import build_unknown_shapes
 from ruian_data_processing import OUTPUT_FILE, REGION_ISO, read_csv_auto
 
 
@@ -295,9 +297,15 @@ def main():
                 subset = df[df["country_code"].isin(countries)]
                 ok = verify(out, name, variant, level, subset) and ok
 
-    print(f"\n=== Výsledek: {'PASSED ✓' if ok else 'FAILED ✗'} ===")
     if not ok:
+        print("\n=== Výsledek: FAILED ✗ ===")
         raise SystemExit(1)
+
+    # Varianty s prvkem pro neznámou hodnotu se odvozují z právě hotových map
+    print()
+    build_unknown_shapes.main()
+
+    print("\n=== Výsledek: PASSED ✓ ===")
 
 
 if __name__ == "__main__":
